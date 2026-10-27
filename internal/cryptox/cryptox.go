@@ -100,3 +100,27 @@ func XORDecrypt(data []byte) []byte {
 	}
 	return out
 }
+
+// XOREncryptBlock applies the block form of the XOR chain cipher used
+// by servers.dat records: the chain runs over ciphertext bytes and
+// restarts at prev=0 for every block (that is, every call).
+func XOREncryptBlock(data []byte) []byte {
+	out := make([]byte, len(data))
+	prev := byte(0)
+	for i, b := range data {
+		out[i] = b ^ (prev + xorKey[i&0xF])
+		prev = out[i]
+	}
+	return out
+}
+
+// XORDecryptBlock reverses XOREncryptBlock.
+func XORDecryptBlock(data []byte) []byte {
+	out := make([]byte, len(data))
+	prev := byte(0)
+	for i, b := range data {
+		out[i] = b ^ (prev + xorKey[i&0xF])
+		prev = b
+	}
+	return out
+}
