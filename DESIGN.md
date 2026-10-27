@@ -99,6 +99,15 @@ and `search.mtapi.io` fallbacks, `Config.Host` direct override, and a
 `servers.dat` parser (the reference ships one as a standalone script)
 for offline resolution.
 
+Application layer (added 2026-10-27): `SearchServers` chains the
+three directories for keyword (broker) search — first non-empty
+result wins, no-match is (nil, nil) — and `DirectoryCache` adds a
+TTL cache (default 24h) over searches and resolutions, mirroring
+the terminal's own servers.dat behaviour. `Config.Directory` wires
+a shared cache into Dial; a cached access point that refuses the
+connection is evicted and re-resolved once, so IP rotations
+self-heal (verified by TestDialEvictsStaleDirectoryEntry).
+
 ## 3.5 Live verification notes (Stage 1, 2026-10-27)
 
 Verified end to end against a live Exness demo account

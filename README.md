@@ -114,6 +114,33 @@ statistics and account monitoring — see
 | `Execution`  | market-order execution mode: `ExecutionAuto` (default), `ExecutionMarket`, `ExecutionInstant` |
 | `TLSConfig`  | TLS override (default does not verify access-server certificates — they are reached by IP and present non-matching certs, as the reference client handles them) |
 | `HTTPClient` | HTTP client for server resolution                                       |
+| `AutoReconnect` | recover dropped sessions in place (see Concepts)                     |
+| `Directory`  | a shared `DirectoryCache` for server resolution (see below)             |
+
+## Adding accounts: broker search and the directory cache
+
+Account-opening flows start from a broker keyword, not a server
+name. `SearchServers(ctx, "Exness", nil)` walks the directory
+chain (MetaQuotes → mt5.mtapi.io → mirror) and returns the first
+non-empty result: companies with their servers (`Name`, `IsDemo`,
+`Access`, ...), ready to present for selection. The user picks a
+server, and `Dial` with that `Server` name resolves and logs in.
+
+Directory data changes slowly, so applications should share one
+cache instead of querying per keystroke or per login:
+
+```go
+dir := mtapi.NewDirectoryCache(24 * time.Hour) // shared, goroutine-safe
+companies, _ := dir.SearchServers(ctx, keyword, nil) // picker list
+client, _ := mtapi.Dial(ctx, mtapi.Config{
+	Login: login, Password: pw, Server: picked,
+	Directory: dir, // logins resolve through the same cache
+})
+```
+
+A cached access point that refuses a connection is evicted and
+re-resolved once automatically, so broker IP rotations heal at
+the next login without waiting for the TTL.
 
 ## Examples
 
