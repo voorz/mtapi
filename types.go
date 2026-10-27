@@ -19,7 +19,24 @@ const (
 // successfully.
 const RetcodeDone = 10009
 
+// RetcodeDonePartial reports a partially completed trade request
+// (for example a close filled for part of the requested volume).
+const RetcodeDonePartial = 10010
+
+// RetcodeRequote reports that the price moved before an
+// instant-execution order could be filled; nothing was executed and
+// the request may be resubmitted with a fresh quote.
+const RetcodeRequote = 10004
+
+// RetcodeInvalid reports that the server rejected the request
+// parameters; nothing was executed.
+const RetcodeInvalid = 10013
+
 // Account is a snapshot of the trading account (command 3).
+//
+// Login is the account number the client authenticated with: the
+// account record itself does not echo it (verified against a live
+// server), and the record's first field is an unrelated internal id.
 //
 // FreeMargin is part of the data model but is not present in the
 // account record the protocol returns; it stays zero, as in the

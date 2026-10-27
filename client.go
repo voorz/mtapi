@@ -42,6 +42,11 @@ type Config struct {
 	// HTTPClient is used for server resolution. Default
 	// http.DefaultClient.
 	HTTPClient *http.Client
+	// Execution selects the protocol trade action used for market
+	// orders (open and close). Default ExecutionAuto: the client
+	// learns per symbol from the server's responses. See
+	// ExecutionMode.
+	Execution ExecutionMode
 }
 
 func (cfg Config) withDefaults() Config {
@@ -78,18 +83,19 @@ type Client struct {
 	tradeMu     sync.Mutex // serializes trade operations
 	tradeEvents chan TradeEvent
 
-	stateMu    sync.RWMutex
-	account    Account
-	hasAccount bool
-	symbols    map[string]*Symbol
-	symbolByID map[int64]string
-	quotes     map[string]Quote
-	posCache   map[int64]Position
-	orderCache map[int64]Order
-	specData   map[int64][]byte
-	onQuote    func(Quote)
-	onTrade    func(TradeEvent)
-	onSpec     func(SymbolSpec)
+	stateMu     sync.RWMutex
+	account     Account
+	hasAccount  bool
+	symbols     map[string]*Symbol
+	symbolByID  map[int64]string
+	quotes      map[string]Quote
+	posCache    map[int64]Position
+	orderCache  map[int64]Order
+	execLearned map[string]uint32 // symbol -> learned market trade action
+	specData    map[int64][]byte
+	onQuote     func(Quote)
+	onTrade     func(TradeEvent)
+	onSpec      func(SymbolSpec)
 
 	done      chan struct{}
 	closeOnce sync.Once
@@ -127,6 +133,7 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 		quotes:      make(map[string]Quote),
 		posCache:    make(map[int64]Position),
 		orderCache:  make(map[int64]Order),
+		execLearned: make(map[string]uint32),
 		specData:    make(map[int64][]byte),
 		done:        make(chan struct{}),
 	}

@@ -88,9 +88,9 @@ func main() {
 	tp := quote.Bid + 0.0050
 	modRes, err := client.ModifyPosition(ctx, ticket, &sl, &tp, nil)
 	step("modify sl/tp", modRes, err)
-	partRes, err := client.PartialClose(ctx, ticket, 0.01, nil)
+	partRes, err := client.PartialClose(ctx, ticket, 0.01, nil, mtapi.TradeOptions{})
 	step("partial close 0.01", partRes, err)
-	closeRes, err := client.ClosePosition(ctx, ticket, nil)
+	closeRes, err := client.ClosePosition(ctx, ticket, nil, mtapi.TradeOptions{})
 	step("close", closeRes, err)
 	fmt.Println("round trip complete")
 }

@@ -33,6 +33,18 @@ type fakeMT5 struct {
 	subscribed  []uint32
 	posOpen     bool
 	pendOrder   bool
+
+	// Behavior knobs for the execution-mode tests.
+	instantOnly   bool     // reject the MARKET action with 10013; INSTANT works
+	requoteCloses int      // answer this many closes with a 10004 requote first
+	tradeActions  []uint32 // every trade action received, in order
+
+	// Position volume tracking (raw units): posVol is the actual
+	// remaining volume; listVol is what the position list reports.
+	// Partial closes update posVol only — the list lags, as on the
+	// real server.
+	posVol  uint64
+	listVol uint64
 }
 
 func (f *fakeMT5) respond(cmdID uint16, body []byte) []byte {
@@ -182,27 +194,42 @@ func (f *fakeMT5) handleTrade(op []byte) [][]byte {
 	cmd12 := f.respond(wire.CmdTrade, respBody)
 
 	event := func(order, deal int64) []byte {
-		body := make([]byte, 380)
-		copy(body[4:252], op)
-		ap := 252
-		binary.LittleEndian.PutUint32(body[ap:ap+4], 10009)
-		binary.LittleEndian.PutUint64(body[ap+4:ap+12], uint64(deal))
-		binary.LittleEndian.PutUint64(body[ap+12:ap+20], uint64(order))
-		binary.LittleEndian.PutUint64(body[ap+20:ap+28], volume)
-		binary.LittleEndian.PutUint64(body[ap+28:ap+36], math.Float64bits(1.0853))
-		copy(body[ap+64:ap+128], wire.EncodeUTF16LE("ok"))
-		return f.respond(wire.CmdTradeEvent, body)
+		return f.tradeEvent(op, 10009, order, deal, volume)
 	}
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.tradeActions = append(f.tradeActions, action)
+
+	// An instant-execution server rejects the MARKET action with
+	// 10013 and a zero command-12 body, exactly as observed live.
+	if f.instantOnly && action == wire.TradeMarket {
+		zero := f.respond(wire.CmdTrade, make([]byte, 4))
+		return [][]byte{zero, f.tradeEvent(op, 10013, 0, 0, 0)}
+	}
+
 	switch action {
-	case wire.TradeMarket:
+	case wire.TradeMarket, wire.TradeInstant:
 		if tradePos == 0 {
 			f.posOpen = true
+			f.posVol = volume
+			f.listVol = volume
 			return [][]byte{cmd12, event(900001, 800001)}
 		}
-		f.posOpen = false
+		if f.requoteCloses > 0 {
+			f.requoteCloses--
+			return [][]byte{cmd12, f.tradeEvent(op, 10004, 0, 0, 0)}
+		}
+		if volume > f.posVol {
+			// More than the remaining volume: invalid, as live.
+			return [][]byte{cmd12, f.tradeEvent(op, 10014, 0, 0, 0)}
+		}
+		if volume == f.posVol {
+			f.posOpen = false
+			f.posVol = 0
+		} else {
+			f.posVol -= volume // listVol unchanged: the list lags
+		}
 		return [][]byte{cmd12, event(900001, 800002)}
 	case wire.TradePending:
 		f.pendOrder = true
@@ -214,6 +241,21 @@ func (f *fakeMT5) handleTrade(op []byte) [][]byte {
 		return [][]byte{cmd12}
 	}
 	return [][]byte{cmd12}
+}
+
+// tradeEvent builds a command-19 event echoing the request Op with
+// the given result fields.
+func (f *fakeMT5) tradeEvent(op []byte, retcode uint32, order, deal int64, volume uint64) []byte {
+	body := make([]byte, 380)
+	copy(body[4:252], op)
+	ap := 252
+	binary.LittleEndian.PutUint32(body[ap:ap+4], retcode)
+	binary.LittleEndian.PutUint64(body[ap+4:ap+12], uint64(deal))
+	binary.LittleEndian.PutUint64(body[ap+12:ap+20], uint64(order))
+	binary.LittleEndian.PutUint64(body[ap+20:ap+28], volume)
+	binary.LittleEndian.PutUint64(body[ap+28:ap+36], math.Float64bits(1.0853))
+	copy(body[ap+64:ap+128], wire.EncodeUTF16LE("ok"))
+	return f.respond(wire.CmdTradeEvent, body)
 }
 
 // positionsBody builds a command-4 body from the fake's trade state.
@@ -233,7 +275,7 @@ func (f *fakeMT5) positionsBody() []byte {
 		copy(rec[24:88], wire.EncodeUTF16LE("EURUSD"))
 		binary.LittleEndian.PutUint32(rec[88:92], 0) // buy
 		binary.LittleEndian.PutUint64(rec[92:100], math.Float64bits(1.0853))
-		binary.LittleEndian.PutUint64(rec[124:132], 1000000) // 0.01 lots
+		binary.LittleEndian.PutUint64(rec[124:132], f.listVol)
 		body.Write(rec)
 	}
 	ordCount := uint32(0)
