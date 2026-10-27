@@ -149,9 +149,22 @@ protocol docs before it is scheduled:
   times & sales, tick history download, profit/margin calculation
   helpers, password change, internal mail, equity history, demo
   account creation.
-- **Robustness beyond the reference**: automatic reconnect with
-  session re-establishment and subscription restore (the reference
-  has a heartbeat loop; reconnect semantics are thin).
+- ~~**Robustness beyond the reference**: automatic reconnect with
+  session re-establishment and subscription restore~~ — **done in
+  Stage 2 (2026-10-27)**. Config.AutoReconnect: a supervisor re-dials
+  (fresh address resolution per attempt), re-runs the auth/login
+  handshake, reloads account and symbols, drops stale quotes and
+  trade-fed caches, and restores subscriptions by name, with
+  backoff from 1s to a 30s cap. Idempotent reads retry
+  transparently on the new session; a trade bound to a dead session
+  fails with ErrConnection and is never resubmitted. A
+  handshake/login failure during reconnect is permanent and
+  surfaces as the client's fatal error. Client.OnReconnect fires
+  after each recovery. Verified against the fake server (drop and
+  recover; second login; subscription restore) and live through a
+  killable TCP relay in front of a real access point: an in-flight
+  Positions call blocked through a ~19s outage and completed on
+  the new session.
 - MT4 support of any kind (the reference is MT5-only).
 
 ## 5. Package layout

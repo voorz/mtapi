@@ -92,6 +92,14 @@ statistics and account monitoring — see
   sentinels (`ErrAuth`, `ErrTimeout`, `ErrServerNotFound`,
   `ErrSymbolNotFound`, `ErrNoQuote`, ...) and trade failures come back
   as `*TradeError` carrying the MT5 retcode (`errors.As`).
+- **Long-running sessions can self-heal.** With
+  `Config{AutoReconnect: true}` a dropped connection is recovered in
+  place: the client re-dials, re-authenticates, reloads state and
+  restores subscriptions. Reads block during the outage and resume;
+  a trade interrupted mid-flight returns `ErrConnection` and is
+  never silently resubmitted (reconcile via `Positions`/`Deals`).
+  `Client.OnReconnect` fires after each recovery. Off by default:
+  without it a drop closes the client.
 
 ## Configuration
 

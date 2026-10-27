@@ -39,10 +39,13 @@ func main() {
 		os.Exit(2)
 	}
 	cfg := mtapi.Config{
-		Login:    login,
-		Password: env("MT5_PASSWORD"),
-		Server:   env("MT5_SERVER"),
-		Host:     os.Getenv("MT5_HOST"),
+		// A statistics collector runs for hours: recover dropped
+		// transports in place instead of dying with them.
+		AutoReconnect: true,
+		Login:         login,
+		Password:      env("MT5_PASSWORD"),
+		Server:        env("MT5_SERVER"),
+		Host:          os.Getenv("MT5_HOST"),
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -54,6 +57,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer client.Close()
+	client.OnReconnect(func() { fmt.Println("(reconnected; session restored)") })
 
 	account, err := client.Account(ctx)
 	if err != nil {
