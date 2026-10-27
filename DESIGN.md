@@ -103,8 +103,11 @@ for offline resolution.
 
 Verified end to end against a live Exness demo account
 (Exness-MT5Trial5, Pro group) from a test host — the read path
-(account, symbols, quotes, candles, positions, orders, deals) and a
-full trade round trip (buy → modify SL/TP → partial close → close).
+(account, symbols, quotes, candles, positions, orders, deals), a
+full market trade round trip (buy → modify SL/TP → partial close →
+close), and the pending-order lifecycle (buy limit → modify →
+cancel). Every trade method the library exposes has now been
+executed against the live server.
 Findings that changed the code, all invisible from the reference
 alone:
 
