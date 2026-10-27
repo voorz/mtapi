@@ -142,8 +142,18 @@ protocol docs before it is scheduled:
 - **Native TCP transport** (the `mt5api.dll` binary protocol).
   The reference documents the login handshake in depth
   (`CONNECTION_PROTOCOL.md`) but has no complete post-login command
-  implementation. The Stage 1 transport is an interface so this can
-  be added without API changes.
+  implementation. Spike (2026-10-27): the documented handshake was
+  implemented from the document and **verified live** against a
+  real Exness access point — plain TCP, TAG 0 login packet, 32-byte
+  challenge (Msg=0), streaming-MD5 challenge solution, TAG 1
+  response with Msg=0 (DONE) and a ~3 KB account payload. The
+  handshake is therefore a solved problem. Everything after login
+  (account/symbol/trade commands on this transport) is undocumented:
+  the decompiled DLL sources the document cites were never
+  committed to the reference repository, so the post-login command
+  layer must be reverse-engineered from live traffic — an
+  open-ended research item, not a port. The Stage 1 transport is
+  an interface so this can be added without API changes.
 - **Function-coverage categories that exist only as scripts or doc
   claims**, not in the packaged client: order book / depth of market,
   times & sales, tick history download, profit/margin calculation
