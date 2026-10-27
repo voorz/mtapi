@@ -143,6 +143,15 @@ A cached access point that refuses a connection is evicted and
 re-resolved once automatically, so broker IP rotations heal at
 the next login without waiting for the TTL.
 
+To show timings next to server names — like the terminal does —
+use `MeasureLatency(ctx, server, nil)` (or
+`DirectoryCache.MeasureLatency`): it resolves the server and
+times a TCP connection to each access point, returning one
+`AccessLatency{Address, Latency, Err}` per point. The library
+only measures; ranking, display and any fastest-point selection
+are the application's policy (an application that wants the
+fastest point passes it back as `Config.Host`).
+
 ## Examples
 
 | Example                              | Shows                                                        |
