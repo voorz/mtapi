@@ -15,11 +15,14 @@ import (
 
 // Broker search endpoints. Server names (e.g. "Exness-MT5Trial17") are
 // resolved to access-point addresses before connecting: SearchMQ is
-// MetaQuotes' own signed directory service; search.mtapi.io is the
-// fallback mirror used by the reference implementation.
+// MetaQuotes' own signed directory service; mt5.mtapi.io is a plain
+// HTTPS directory (the source the owner's broker-query product runs
+// on in production); search.mtapi.io is the fallback mirror used by
+// the reference implementation.
 var (
 	searchMQURL = "https://updates.metaquotes.net/public/mt5/network"
 	searchURL   = "http://search.mtapi.io/Search"
+	searchMT5IO = "https://mt5.mtapi.io/Search"
 )
 
 // searchHMACKey signs SearchMQ requests (see computeSearchSignature).
@@ -206,13 +209,62 @@ func Search(ctx context.Context, company string, client *http.Client) ([]Company
 	return parsed.companies(), nil
 }
 
+// mtapiIOResponse is the wire shape of the mt5.mtapi.io directory: a
+// bare JSON array (no envelope), with a companyName key.
+type mtapiIOResponse []struct {
+	CompanyName string `json:"companyName"`
+	Results     []struct {
+		Name   string   `json:"name"`
+		Access []string `json:"access"`
+	} `json:"results"`
+}
+
+// SearchMT5IO queries the mt5.mtapi.io directory. MT5 access entries
+// from this source already carry their ports.
+func SearchMT5IO(ctx context.Context, company string, client *http.Client) ([]CompanyResults, error) {
+	ctx, cancel := searchCtx(ctx)
+	defer cancel()
+
+	u := searchMT5IO + "?company=" + url.QueryEscape(company)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", searchUserAgent)
+	resp, err := searchClient(client).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("mtapi: mt5.mtapi.io returned HTTP %d", resp.StatusCode)
+	}
+	var parsed mtapiIOResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&parsed); err != nil {
+		return nil, fmt.Errorf("mtapi: decode mt5.mtapi.io response: %w", err)
+	}
+	out := make([]CompanyResults, 0, len(parsed))
+	for _, c := range parsed {
+		cr := CompanyResults{Company: c.CompanyName}
+		for _, s := range c.Results {
+			cr.Results = append(cr.Results, ServerInfo{
+				Company: c.CompanyName,
+				Name:    s.Name,
+				Access:  s.Access,
+			})
+		}
+		out = append(out, cr)
+	}
+	return out, nil
+}
+
 // FindServer resolves a server name to its ServerInfo. It tries
-// SearchMQ first and falls back to the mirror, matching names
-// case-insensitively, as the reference does. The returned error wraps
+// SearchMQ first, then mt5.mtapi.io, then the reference's mirror,
+// matching names case-insensitively. The returned error wraps
 // ErrServerNotFound when no directory lists the server.
 func FindServer(ctx context.Context, name string, client *http.Client) (*ServerInfo, error) {
 	var lastErr error
-	for _, query := range []func(context.Context, string, *http.Client) ([]CompanyResults, error){SearchMQ, Search} {
+	for _, query := range []func(context.Context, string, *http.Client) ([]CompanyResults, error){SearchMQ, SearchMT5IO, Search} {
 		companies, err := query(ctx, name, client)
 		if err != nil {
 			lastErr = err

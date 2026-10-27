@@ -94,10 +94,10 @@ MT5 retcode where applicable, with sentinel/typed variants for
 
 ### 3.4 Server resolution
 
-SearchMQ client (signature scheme as documented), `search.mtapi.io`
-fallback, `Config.Host` direct override, and a `servers.dat` parser
-(the reference ships one as a standalone script) for offline
-resolution.
+SearchMQ client (signature scheme as documented), `mt5.mtapi.io`
+and `search.mtapi.io` fallbacks, `Config.Host` direct override, and a
+`servers.dat` parser (the reference ships one as a standalone script)
+for offline resolution.
 
 ## 4. Stage 2 backlog — what the reference does not have
 

@@ -66,9 +66,29 @@ func TestSearchMQAgainstStub(t *testing.T) {
 	}
 }
 
+func TestSearchMT5IOAgainstStub(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `[{"companyName":"Exness","results":[{"name":"Exness-MT5Trial17","access":["13.213.81.113:443"]}]}]`)
+	}))
+	defer srv.Close()
+
+	old := searchMT5IO
+	searchMT5IO = srv.URL
+	defer func() { searchMT5IO = old }()
+
+	companies, err := SearchMT5IO(context.Background(), "Exness", srv.Client())
+	if err != nil {
+		t.Fatalf("SearchMT5IO: %v", err)
+	}
+	if len(companies) != 1 || companies[0].Company != "Exness" ||
+		len(companies[0].Results) != 1 || companies[0].Results[0].Access[0] != "13.213.81.113:443" {
+		t.Fatalf("companies = %+v", companies)
+	}
+}
+
 func TestFindServerFallbackAndMatch(t *testing.T) {
-	oldMQ, oldSearch := searchMQURL, searchURL
-	defer func() { searchMQURL, searchURL = oldMQ, oldSearch }()
+	oldMQ, oldSearch, oldIO := searchMQURL, searchURL, searchMT5IO
+	defer func() { searchMQURL, searchURL, searchMT5IO = oldMQ, oldSearch, oldIO }()
 
 	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "down", http.StatusBadGateway)
@@ -79,6 +99,7 @@ func TestFindServerFallbackAndMatch(t *testing.T) {
 	}))
 	defer good.Close()
 	searchMQURL = bad.URL
+	searchMT5IO = bad.URL
 	searchURL = good.URL
 
 	info, err := FindServer(context.Background(), "exness-mt5trial17", nil)
