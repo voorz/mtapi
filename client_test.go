@@ -37,6 +37,7 @@ type fakeMT5 struct {
 
 	// Behavior knobs for the execution-mode tests.
 	instantOnly   bool     // reject the MARKET action with 10013; INSTANT works
+	marketOnly    bool     // reject the INSTANT action with 10013; MARKET works
 	requoteCloses int      // answer this many closes with a 10004 requote first
 	tradeActions  []uint32 // every trade action received, in order
 
@@ -225,8 +226,9 @@ func (f *fakeMT5) handleTrade(op []byte) [][]byte {
 	f.tradeActions = append(f.tradeActions, action)
 
 	// An instant-execution server rejects the MARKET action with
-	// 10013 and a zero command-12 body, exactly as observed live.
-	if f.instantOnly && action == wire.TradeMarket {
+	// 10013 and a zero command-12 body, exactly as observed live;
+	// a market-execution server does the same to INSTANT.
+	if (f.instantOnly && action == wire.TradeMarket) || (f.marketOnly && action == wire.TradeInstant) {
 		zero := f.respond(wire.CmdTrade, make([]byte, 4))
 		return [][]byte{zero, f.tradeEvent(op, 10013, 0, 0, 0)}
 	}

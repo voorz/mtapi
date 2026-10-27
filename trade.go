@@ -52,10 +52,12 @@ func (o TradeOptions) deviation() uint32 {
 type ExecutionMode int
 
 const (
-	// ExecutionAuto probes with the MARKET action and, when the
-	// server rejects it as invalid (10013 — a pure validation
-	// rejection that executes nothing), retries with INSTANT and
-	// remembers the symbol's mode for the rest of the session.
+	// ExecutionAuto probes with the INSTANT action — the mode of
+	// the accounts this library primarily serves (e.g. Exness
+	// Pro) — and, when the server rejects it as invalid (10013, a
+	// pure validation rejection that executes nothing), retries
+	// with MARKET and remembers the symbol's mode for the rest of
+	// the session.
 	ExecutionAuto ExecutionMode = iota
 	// ExecutionMarket always uses the MARKET action.
 	ExecutionMarket
@@ -496,7 +498,7 @@ func (c *Client) doTrade(ctx context.Context, op wire.OpParams) (TradeResult, er
 
 // marketAction resolves the trade action for a market operation on
 // symbol: the configured mode, or in ExecutionAuto the learned
-// action (MARKET until an INSTANT requirement is learned).
+// action (INSTANT until a MARKET requirement is learned).
 func (c *Client) marketAction(symbol string) (action uint32, mayFallback bool) {
 	switch c.cfg.Execution {
 	case ExecutionMarket:
@@ -510,7 +512,7 @@ func (c *Client) marketAction(symbol string) (action uint32, mayFallback bool) {
 	if ok {
 		return learned, false
 	}
-	return wire.TradeMarket, true
+	return wire.TradeInstant, true
 }
 
 func (c *Client) learnExecAction(symbol string, action uint32) {
@@ -522,22 +524,26 @@ func (c *Client) learnExecAction(symbol string, action uint32) {
 // runMarketTrade executes one market-family operation (open, close,
 // partial close), handling the two behaviors live servers exhibit
 // that the reference — validated only on a market-execution
-// account — does not: instant-execution symbols reject the MARKET
-// action with 10013 (in ExecutionAuto the INSTANT action is tried
-// and learned), and instant execution requotes when the price moved
-// (the operation is resubmitted with a fresh quote). build
-// constructs the Op for a given trade action and price; priceFor
-// reports the current execution price and is re-read before every
-// attempt.
+// account — does not: a symbol rejects the trade action that does
+// not match its execution mode with 10013 (in ExecutionAuto the
+// other action is tried and learned), and instant execution
+// requotes when the price moved (the operation is resubmitted with
+// a fresh quote). build constructs the Op for a given trade action
+// and price; priceFor reports the current execution price and is
+// re-read before every attempt.
 func (c *Client) runMarketTrade(ctx context.Context, symbol string, build func(action uint32, price float64) wire.OpParams, priceFor func() (float64, bool)) (TradeResult, error) {
 	action, mayFallback := c.marketAction(symbol)
 	res, err := c.tradeWithRequoteRetry(ctx, symbol, action, build, priceFor)
 	if err != nil || !mayFallback || res.Retcode != RetcodeInvalid {
 		return res, err
 	}
-	res, err = c.tradeWithRequoteRetry(ctx, symbol, wire.TradeInstant, build, priceFor)
+	var other uint32 = wire.TradeMarket
+	if action == wire.TradeMarket {
+		other = wire.TradeInstant
+	}
+	res, err = c.tradeWithRequoteRetry(ctx, symbol, other, build, priceFor)
 	if err == nil && res.Retcode != RetcodeInvalid {
-		c.learnExecAction(symbol, wire.TradeInstant)
+		c.learnExecAction(symbol, other)
 	}
 	return res, err
 }

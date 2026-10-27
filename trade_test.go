@@ -100,10 +100,10 @@ func TestTradeRoundTrip(t *testing.T) {
 	}
 }
 
-// An instant-execution server rejects the MARKET action with 10013.
-// In ExecutionAuto the client must fall back to INSTANT, learn the
-// symbol's mode, and use it directly from then on — for closes too.
-func TestInstantExecutionFallback(t *testing.T) {
+// INSTANT is the ExecutionAuto default: on an instant-execution
+// server the first attempt already succeeds, and the close reuses
+// the learned mode. Wire values: INSTANT=2, MARKET=3.
+func TestInstantIsDefault(t *testing.T) {
 	client, fake, ctx := dialFakeConfigured(t, func(f *fakeMT5) { f.instantOnly = true }, mtapi.ExecutionAuto)
 
 	if _, err := client.SubscribeQuote(ctx, "EURUSD"); err != nil {
@@ -121,9 +121,42 @@ func TestInstantExecutionFallback(t *testing.T) {
 	fake.mu.Lock()
 	actions := append([]uint32(nil), fake.tradeActions...)
 	fake.mu.Unlock()
-	// Expect: MARKET (rejected) -> INSTANT (buy) -> INSTANT (close,
-	// learned). The wire values are 3 and 2.
-	want := []uint32{3, 2, 2}
+	want := []uint32{2, 2}
+	if len(actions) != len(want) {
+		t.Fatalf("trade actions = %v, want %v", actions, want)
+	}
+	for i := range want {
+		if actions[i] != want[i] {
+			t.Fatalf("trade actions = %v, want %v", actions, want)
+		}
+	}
+}
+
+// On a market-execution server the default INSTANT probe is
+// rejected with 10013 (nothing executes); ExecutionAuto falls
+// back to MARKET, learns the symbol's mode, and uses it directly
+// from then on — for closes too.
+func TestMarketFallback(t *testing.T) {
+	client, fake, ctx := dialFakeConfigured(t, func(f *fakeMT5) { f.marketOnly = true }, mtapi.ExecutionAuto)
+
+	if _, err := client.SubscribeQuote(ctx, "EURUSD"); err != nil {
+		t.Fatalf("SubscribeQuote: %v", err)
+	}
+	res, err := client.Buy(ctx, "EURUSD", 0.01, mtapi.TradeOptions{})
+	if err != nil || res.Retcode != mtapi.RetcodeDone || res.Order != 900001 {
+		t.Fatalf("buy on market server = %+v, %v", res, err)
+	}
+	res, err = client.ClosePosition(ctx, 900001, nil, mtapi.TradeOptions{})
+	if err != nil || res.Retcode != mtapi.RetcodeDone {
+		t.Fatalf("close on market server = %+v, %v", res, err)
+	}
+
+	fake.mu.Lock()
+	actions := append([]uint32(nil), fake.tradeActions...)
+	fake.mu.Unlock()
+	// Expect: INSTANT (rejected) -> MARKET (buy) -> MARKET (close,
+	// learned).
+	want := []uint32{2, 3, 3}
 	if len(actions) != len(want) {
 		t.Fatalf("trade actions = %v, want %v", actions, want)
 	}
