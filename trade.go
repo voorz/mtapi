@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -615,7 +616,15 @@ drain:
 		}
 	}
 
-	if err := c.sendEncrypted(wire.CmdTrade, op); err != nil {
+	// Bind the operation to one session. Waiting for a session
+	// (during a reconnect) before sending is fine; once sent, the
+	// operation is never resubmitted — if the session drops
+	// mid-flight the outcome is unknown and reported as such.
+	sess, err := c.waitSession(ctx)
+	if err != nil {
+		return TradeResult{}, err
+	}
+	if err := c.sendEncryptedOn(sess, wire.CmdTrade, op); err != nil {
 		return TradeResult{}, err
 	}
 
@@ -648,6 +657,8 @@ drain:
 			}
 		case <-deadline.C:
 			return TradeResult{}, fmt.Errorf("%w: no trade response", ErrTimeout)
+		case <-sess.dead:
+			return TradeResult{}, connError(errors.New("connection dropped during trade; outcome unknown, reconcile via Positions/Deals"))
 		case <-c.done:
 			return TradeResult{}, ErrClosed
 		case <-ctx.Done():

@@ -47,6 +47,16 @@ type Config struct {
 	// learns per symbol from the server's responses. See
 	// ExecutionMode.
 	Execution ExecutionMode
+	// AutoReconnect keeps the session alive across connection
+	// drops: when the transport fails, the client re-dials,
+	// re-authenticates, reloads the account and symbol list, and
+	// restores subscriptions, with backoff. Read operations block
+	// during the outage and resume on the new session; a trade
+	// interrupted mid-flight fails with ErrConnection and is never
+	// silently resubmitted (reconcile via Positions/Deals).
+	// Default false: a drop closes the client, as in the
+	// reference.
+	AutoReconnect bool
 }
 
 func (cfg Config) withDefaults() Config {
@@ -65,12 +75,28 @@ func (cfg Config) withDefaults() Config {
 // identifier (the reference implementation keys its pending table by
 // command id the same way).
 //
-// A Client is single-use: after Close, create a new one with Dial.
+// After Close the client is done: create a new one with Dial. With
+// Config.AutoReconnect a dropped transport is recovered in place
+// instead (see the field's documentation).
 type Client struct {
-	cfg  Config
-	conn *ws.Conn
+	cfg Config
 
-	sessionKey []byte
+	// Session state. A session is one transport connection plus
+	// its key; it is replaced wholesale on reconnect. sessChanged
+	// is closed and recreated on every session transition to wake
+	// waiters.
+	sessMu      sync.RWMutex
+	sess        *session
+	sessChanged chan struct{}
+	fatalErr    error // permanent reconnect failure (e.g. auth)
+	closedFlag  bool  // set by Close under sessMu; blocks new sessions
+	nextSessID  uint64
+	kick        chan struct{} // reconnect requests, buffered 1
+	supWg       sync.WaitGroup
+	loopsWg     sync.WaitGroup // recv+heartbeat loops of all sessions
+
+	baseCtx    context.Context
+	baseCancel context.CancelFunc
 
 	sendMu sync.Mutex // serializes frame writes, as the reference does
 
@@ -92,14 +118,25 @@ type Client struct {
 	posCache    map[int64]Position
 	orderCache  map[int64]Order
 	execLearned map[string]uint32 // symbol -> learned market trade action
+	subscribed  map[string]bool   // symbol names with a live subscription
 	specData    map[int64][]byte
 	onQuote     func(Quote)
 	onTrade     func(TradeEvent)
 	onSpec      func(SymbolSpec)
+	onReconnect func()
 
 	done      chan struct{}
 	closeOnce sync.Once
-	wg        sync.WaitGroup
+}
+
+// session is one established transport: a connection, its session
+// key, and the loops serving it. dead is closed when the receive
+// loop exits.
+type session struct {
+	id   uint64
+	conn *ws.Conn
+	key  []byte
+	dead chan struct{}
 }
 
 // Dial resolves the server, connects, performs the auth handshake and
@@ -118,13 +155,10 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 		return nil, errors.New("mtapi: Config.Server or Config.Host is required")
 	}
 
-	addr, err := cfg.resolveAddr(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	c := &Client{
 		cfg:         cfg,
+		sessChanged: make(chan struct{}),
+		kick:        make(chan struct{}, 1),
 		slots:       make(map[uint16]chan struct{}),
 		pending:     make(map[uint16]chan *wire.Response),
 		tradeEvents: make(chan TradeEvent, 64),
@@ -134,31 +168,23 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 		posCache:    make(map[int64]Position),
 		orderCache:  make(map[int64]Order),
 		execLearned: make(map[string]uint32),
+		subscribed:  make(map[string]bool),
 		specData:    make(map[int64][]byte),
 		done:        make(chan struct{}),
 	}
+	c.baseCtx, c.baseCancel = context.WithCancel(context.Background())
 
-	conn, err := ws.Dial(ctx, addr, "/terminal", ws.Options{
-		TLSConfig: cfg.TLSConfig,
-		Origin:    "https://" + addr,
-	})
+	sess, err := c.establish(ctx)
 	if err != nil {
-		return nil, connError(err)
-	}
-	c.conn = conn
-
-	if err := c.auth(ctx); err != nil {
-		conn.Close()
+		c.baseCancel()
 		return nil, err
 	}
-	if err := c.login(ctx); err != nil {
-		conn.Close()
-		return nil, err
-	}
+	c.installSession(sess)
 
-	c.wg.Add(2)
-	go c.recvLoop()
-	go c.heartbeatLoop()
+	if cfg.AutoReconnect {
+		c.supWg.Add(1)
+		go c.reconnectSupervisor()
+	}
 
 	if _, err := c.Account(ctx); err != nil {
 		c.Close()
@@ -169,6 +195,90 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("mtapi: load symbols: %w", err)
 	}
 	return c, nil
+}
+
+// establish dials a fresh transport and performs the auth handshake
+// and login on it. The returned session is not installed yet.
+func (c *Client) establish(ctx context.Context) (*session, error) {
+	addr, err := c.cfg.resolveAddr(ctx)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := ws.Dial(ctx, addr, "/terminal", ws.Options{
+		TLSConfig: c.cfg.TLSConfig,
+		Origin:    "https://" + addr,
+	})
+	if err != nil {
+		return nil, connError(err)
+	}
+	c.sessMu.Lock()
+	c.nextSessID++
+	sess := &session{id: c.nextSessID, conn: conn, dead: make(chan struct{})}
+	c.sessMu.Unlock()
+
+	if err := c.authOn(ctx, sess); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if err := c.loginOn(ctx, sess); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return sess, nil
+}
+
+// installSession makes sess the live session and starts its
+// receive and heartbeat loops. It refuses when the client is
+// already closed (the caller then owns and closes the session).
+func (c *Client) installSession(sess *session) bool {
+	c.sessMu.Lock()
+	if c.closedFlag {
+		c.sessMu.Unlock()
+		return false
+	}
+	c.sess = sess
+	close(c.sessChanged)
+	c.sessChanged = make(chan struct{})
+	c.sessMu.Unlock()
+
+	c.loopsWg.Add(2)
+	go c.recvLoop(sess)
+	go c.heartbeatLoop(sess)
+	return true
+}
+
+// currentSession returns the live session, or nil while down.
+func (c *Client) currentSession() *session {
+	c.sessMu.RLock()
+	defer c.sessMu.RUnlock()
+	return c.sess
+}
+
+// waitSession returns the live session, waiting for a reconnect
+// when none is up. Without AutoReconnect a dead session is final
+// (the client is closing or closed) and ErrClosed is returned.
+func (c *Client) waitSession(ctx context.Context) (*session, error) {
+	for {
+		c.sessMu.RLock()
+		sess, changed, fatal := c.sess, c.sessChanged, c.fatalErr
+		c.sessMu.RUnlock()
+		if sess != nil {
+			return sess, nil
+		}
+		if fatal != nil {
+			return nil, fatal
+		}
+		if !c.cfg.AutoReconnect {
+			return nil, ErrClosed
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-c.done:
+			return nil, ErrClosed
+		}
+	}
 }
 
 // resolveAddr determines the "host:port" of the access point.
@@ -199,15 +309,22 @@ func (c *Client) Login() uint64 { return c.cfg.Login }
 // Server returns the configured server name.
 func (c *Client) Server() string { return c.cfg.Server }
 
-// Close tears down the session. It is safe to call more than once.
+// Close tears down the client, stopping any reconnect activity.
+// It is safe to call more than once.
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
+		c.sessMu.Lock()
+		c.closedFlag = true
+		sess := c.sess
+		c.sessMu.Unlock()
 		close(c.done)
-		if c.conn != nil {
-			c.conn.Close()
+		c.baseCancel()
+		if sess != nil {
+			sess.conn.Close()
 		}
 	})
-	c.wg.Wait()
+	c.supWg.Wait()
+	c.loopsWg.Wait()
 	return nil
 }
 
@@ -224,11 +341,11 @@ func (c *Client) isDone() bool {
 // Handshake
 // ---------------------------------------------------------------------------
 
-// auth performs the command-0 handshake: a 64-byte zero payload
-// encrypted with the static key; the response body carries the
-// session key at offset 66 (after a 2-byte sub-tag and a 64-byte
-// session token).
-func (c *Client) auth(ctx context.Context) error {
+// authOn performs the command-0 handshake on sess: a 64-byte zero
+// payload encrypted with the static key; the response body carries
+// the session key at offset 66 (after a 2-byte sub-tag and a
+// 64-byte session token).
+func (c *Client) authOn(ctx context.Context, sess *session) error {
 	var rb [2]byte
 	if _, err := rand.Read(rb[:]); err != nil {
 		return err
@@ -238,10 +355,10 @@ func (c *Client) auth(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := c.conn.Send(wire.PackWire(enc)); err != nil {
+	if err := sess.conn.Send(wire.PackWire(enc)); err != nil {
 		return connError(err)
 	}
-	resp, err := c.recvOne(ctx, cryptox.StaticKey)
+	resp, err := c.recvOneOn(ctx, sess, cryptox.StaticKey)
 	if err != nil {
 		return err
 	}
@@ -255,14 +372,14 @@ func (c *Client) auth(ctx context.Context) error {
 	if len(resp.Body) < 66+32 {
 		return authError("auth response too short: %d bytes", len(resp.Body))
 	}
-	c.sessionKey = append([]byte(nil), resp.Body[66:]...)
+	sess.key = append([]byte(nil), resp.Body[66:]...)
 	return nil
 }
 
-// login performs the command-28 login with the 912-byte payload:
-// password (UTF-16LE) at offset 4, server name at 480 with its
-// character count at 476, login (uint64) at 736.
-func (c *Client) login(ctx context.Context) error {
+// loginOn performs the command-28 login on sess with the 912-byte
+// payload: password (UTF-16LE) at offset 4, server name at 480 with
+// its character count at 476, login (uint64) at 736.
+func (c *Client) loginOn(ctx context.Context, sess *session) error {
 	payload := make([]byte, 912)
 	pw := wire.EncodeUTF16LE(c.cfg.Password)
 	copy(payload[4:476], pw)
@@ -271,10 +388,10 @@ func (c *Client) login(ctx context.Context) error {
 	copy(payload[480:736], name)
 	binary.LittleEndian.PutUint64(payload[736:744], c.cfg.Login)
 
-	if err := c.sendEncrypted(wire.CmdLogin, payload); err != nil {
+	if err := c.sendEncryptedOn(sess, wire.CmdLogin, payload); err != nil {
 		return err
 	}
-	resp, err := c.recvOne(ctx, c.sessionKey)
+	resp, err := c.recvOneOn(ctx, sess, sess.key)
 	if err != nil {
 		return err
 	}
@@ -284,13 +401,13 @@ func (c *Client) login(ctx context.Context) error {
 	return nil
 }
 
-// recvOne reads and decodes a single message outside the receive loop
-// (used by the handshake phases). The context is bounded by the
-// configured request timeout.
-func (c *Client) recvOne(ctx context.Context, key []byte) (*wire.Response, error) {
+// recvOneOn reads and decodes a single message outside the receive
+// loop (used by the handshake phases). The context is bounded by
+// the configured request timeout.
+func (c *Client) recvOneOn(ctx context.Context, sess *session, key []byte) (*wire.Response, error) {
 	rctx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
 	defer cancel()
-	msg, err := c.conn.Recv(rctx)
+	msg, err := sess.conn.Recv(rctx)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return nil, fmt.Errorf("%w: waiting for handshake response", ErrTimeout)
@@ -320,36 +437,72 @@ func decodeMessage(msg, key []byte) *wire.Response {
 // Session plumbing
 // ---------------------------------------------------------------------------
 
-// sendEncrypted builds, encrypts (session key) and sends one command.
-func (c *Client) sendEncrypted(cmdID uint16, payload []byte) error {
+// sendEncryptedOn builds, encrypts (session key) and sends one
+// command on a specific session.
+func (c *Client) sendEncryptedOn(sess *session, cmdID uint16, payload []byte) error {
 	var rb [2]byte
 	if _, err := rand.Read(rb[:]); err != nil {
 		return err
 	}
 	plain := wire.BuildCommand(rb[0], rb[1], cmdID, payload)
-	enc, err := cryptox.AESEncrypt(c.sessionKey, plain)
+	enc, err := cryptox.AESEncrypt(sess.key, plain)
 	if err != nil {
 		return err
 	}
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
-	if c.isDone() {
-		return ErrClosed
+	select {
+	case <-sess.dead:
+		return connError(errors.New("session is down"))
+	default:
 	}
-	if err := c.conn.Send(wire.PackWire(enc)); err != nil {
+	if err := sess.conn.Send(wire.PackWire(enc)); err != nil {
 		return connError(err)
 	}
 	return nil
 }
 
+// sendEncrypted sends one command on the live session, waiting for
+// a reconnect when the client is configured for it.
+func (c *Client) sendEncrypted(ctx context.Context, cmdID uint16, payload []byte) error {
+	sess, err := c.waitSession(ctx)
+	if err != nil {
+		return err
+	}
+	return c.sendEncryptedOn(sess, cmdID, payload)
+}
+
 // sendAndWait sends a command and waits for the response with the
 // expected command id. Requests are serialized per command id.
+// Every command routed here is an idempotent read or subscription,
+// so with AutoReconnect an attempt interrupted by a drop is
+// retried on the new session until the context ends.
 func (c *Client) sendAndWait(ctx context.Context, cmdID uint16, payload []byte, expected uint16) (*wire.Response, error) {
 	release, err := c.acquireSlot(ctx, expected)
 	if err != nil {
 		return nil, err
 	}
 	defer release()
+
+	for {
+		resp, retry, err := c.sendAndWaitOnce(ctx, cmdID, payload, expected)
+		if err != nil {
+			return nil, err
+		}
+		if !retry {
+			return resp, nil
+		}
+	}
+}
+
+// sendAndWaitOnce is one attempt of sendAndWait. retry is true when
+// the attempt was interrupted by a session drop and the caller may
+// resend on a new session.
+func (c *Client) sendAndWaitOnce(ctx context.Context, cmdID uint16, payload []byte, expected uint16) (resp *wire.Response, retry bool, err error) {
+	sess, err := c.waitSession(ctx)
+	if err != nil {
+		return nil, false, err
+	}
 
 	ch := make(chan *wire.Response, 1)
 	c.pendingMu.Lock()
@@ -361,22 +514,30 @@ func (c *Client) sendAndWait(ctx context.Context, cmdID uint16, payload []byte, 
 		c.pendingMu.Unlock()
 	}()
 
-	if err := c.sendEncrypted(cmdID, payload); err != nil {
-		return nil, err
+	if err := c.sendEncryptedOn(sess, cmdID, payload); err != nil {
+		if c.cfg.AutoReconnect && !c.isDone() {
+			return nil, true, nil
+		}
+		return nil, false, err
 	}
 
 	rctx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
 	defer cancel()
 	select {
 	case resp := <-ch:
-		return resp, nil
+		return resp, false, nil
+	case <-sess.dead:
+		if c.cfg.AutoReconnect && !c.isDone() {
+			return nil, true, nil
+		}
+		return nil, false, ErrClosed
 	case <-rctx.Done():
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		return nil, fmt.Errorf("%w: command %d", ErrTimeout, cmdID)
+		return nil, false, fmt.Errorf("%w: command %d", ErrTimeout, cmdID)
 	case <-c.done:
-		return nil, ErrClosed
+		return nil, false, ErrClosed
 	}
 }
 
@@ -400,23 +561,24 @@ func (c *Client) acquireSlot(ctx context.Context, cmd uint16) (func(), error) {
 	}
 }
 
-// recvLoop dispatches incoming messages: pending requests first, then
-// the push handlers (quotes, trade events, symbol specs). All other
-// commands are notifications the reference also ignores.
-func (c *Client) recvLoop() {
-	defer c.wg.Done()
+// recvLoop dispatches incoming messages for one session: pending
+// requests first, then the push handlers (quotes, trade events,
+// symbol specs). All other commands are notifications the
+// reference also ignores. A fatal receive error ends the session.
+func (c *Client) recvLoop(sess *session) {
+	defer c.loopsWg.Done()
+	defer c.onSessionDeath(sess)
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		msg, err := c.conn.Recv(ctx)
+		msg, err := sess.conn.Recv(ctx)
 		cancel()
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) && !c.isDone() {
 				continue
 			}
-			c.shutdown()
 			return
 		}
-		resp := decodeMessage(msg, c.sessionKey)
+		resp := decodeMessage(msg, sess.key)
 		if resp == nil {
 			continue
 		}
@@ -434,6 +596,35 @@ func (c *Client) recvLoop() {
 			// Account updates, system notices, position updates and
 			// heartbeat echoes carry no state this client tracks.
 		}
+	}
+}
+
+// onSessionDeath retires a session whose receive loop has exited:
+// it wakes the session's waiters and either asks the supervisor for
+// a reconnect (AutoReconnect) or shuts the client down.
+func (c *Client) onSessionDeath(sess *session) {
+	close(sess.dead)
+	sess.conn.Close()
+
+	c.sessMu.Lock()
+	wasLive := c.sess == sess
+	if wasLive {
+		c.sess = nil
+		close(c.sessChanged)
+		c.sessChanged = make(chan struct{})
+	}
+	c.sessMu.Unlock()
+
+	if c.isDone() || !wasLive {
+		return
+	}
+	if c.cfg.AutoReconnect {
+		select {
+		case c.kick <- struct{}{}:
+		default:
+		}
+	} else {
+		c.shutdown()
 	}
 }
 
@@ -455,32 +646,160 @@ func (c *Client) dispatchPending(resp *wire.Response) bool {
 	return true
 }
 
-// heartbeatLoop sends the command-51 heartbeat every 3 seconds, the
-// interval the reference uses.
-func (c *Client) heartbeatLoop() {
-	defer c.wg.Done()
+// heartbeatLoop sends the command-51 heartbeat every 3 seconds
+// for one session, the interval the reference uses.
+func (c *Client) heartbeatLoop(sess *session) {
+	defer c.loopsWg.Done()
 	t := time.NewTicker(3 * time.Second)
 	defer t.Stop()
 	for {
 		select {
 		case <-c.done:
 			return
+		case <-sess.dead:
+			return
 		case <-t.C:
-			if err := c.sendEncrypted(wire.CmdHeartbeat, nil); err != nil {
+			if err := c.sendEncryptedOn(sess, wire.CmdHeartbeat, nil); err != nil {
 				return
 			}
 		}
 	}
 }
 
-// shutdown closes the client after a fatal receive error.
+// shutdown closes the client after a fatal receive error when
+// AutoReconnect is off.
 func (c *Client) shutdown() {
 	c.closeOnce.Do(func() {
+		c.sessMu.Lock()
+		c.closedFlag = true
+		sess := c.sess
+		c.sessMu.Unlock()
 		close(c.done)
-		if c.conn != nil {
-			c.conn.Close()
+		c.baseCancel()
+		if sess != nil {
+			sess.conn.Close()
 		}
 	})
+}
+
+// reconnectSupervisor re-establishes the session after a drop,
+// with backoff (1s doubling to a 30s cap), until the client is
+// closed. A handshake or login failure is permanent: retrying
+// cannot fix credentials, so it is recorded as the client's fatal
+// error and surfaced to waiting callers.
+func (c *Client) reconnectSupervisor() {
+	defer c.supWg.Done()
+	backoff := time.Second
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-c.kick:
+		}
+
+		for {
+			if c.isDone() {
+				return
+			}
+			attemptCtx, cancel := context.WithCancel(c.baseCtx)
+			sess, err := c.establish(attemptCtx)
+			if err == nil {
+				if !c.installSession(sess) {
+					sess.conn.Close()
+					cancel()
+					return
+				}
+				err = c.restoreSession(attemptCtx)
+				if err == nil {
+					cancel()
+					backoff = time.Second
+					c.fireOnReconnect()
+					break
+				}
+				// The fresh session failed to restore: retire it
+				// and treat the attempt as failed.
+				c.retireSession(sess)
+				sess.conn.Close()
+			}
+			cancel()
+			if err != nil && errors.Is(err, ErrAuth) {
+				c.sessMu.Lock()
+				c.fatalErr = err
+				close(c.sessChanged)
+				c.sessChanged = make(chan struct{})
+				c.sessMu.Unlock()
+				return
+			}
+			select {
+			case <-time.After(backoff):
+			case <-c.done:
+				return
+			}
+			if backoff < 30*time.Second {
+				backoff *= 2
+			}
+		}
+	}
+}
+
+// retireSession removes sess as the live session (used when a
+// freshly established session fails its restore step).
+func (c *Client) retireSession(sess *session) {
+	c.sessMu.Lock()
+	if c.sess == sess {
+		c.sess = nil
+		close(c.sessChanged)
+		c.sessChanged = make(chan struct{})
+	}
+	c.sessMu.Unlock()
+}
+
+// restoreSession rebuilds the volatile state on a fresh session:
+// stale quotes and trade-fed caches are dropped, the account and
+// symbol list are reloaded, and subscriptions are re-sent (symbol
+// ids may differ on the new session, so names are re-resolved).
+func (c *Client) restoreSession(ctx context.Context) error {
+	c.stateMu.Lock()
+	c.quotes = make(map[string]Quote)
+	c.posCache = make(map[int64]Position)
+	c.orderCache = make(map[int64]Order)
+	names := make([]string, 0, len(c.subscribed))
+	for name := range c.subscribed {
+		names = append(names, name)
+	}
+	c.stateMu.Unlock()
+
+	if _, err := c.Account(ctx); err != nil {
+		return err
+	}
+	if _, err := c.Symbols(ctx); err != nil {
+		return err
+	}
+	if len(names) > 0 {
+		if err := c.Subscribe(ctx, names...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// fireOnReconnect invokes the registered reconnect callback.
+func (c *Client) fireOnReconnect() {
+	c.stateMu.RLock()
+	cb := c.onReconnect
+	c.stateMu.RUnlock()
+	if cb != nil {
+		callSafely(cb)
+	}
+}
+
+// OnReconnect registers a callback invoked after a session has
+// been re-established and subscriptions restored (AutoReconnect
+// only). Callbacks must not block. Pass nil to clear.
+func (c *Client) OnReconnect(fn func()) {
+	c.stateMu.Lock()
+	c.onReconnect = fn
+	c.stateMu.Unlock()
 }
 
 // OnQuote registers the callback for quote pushes. Callbacks run on

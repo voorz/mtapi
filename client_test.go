@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -45,6 +46,27 @@ type fakeMT5 struct {
 	// real server.
 	posVol  uint64
 	listVol uint64
+
+	// Reconnect test hooks.
+	curConn    net.Conn
+	loginCount int
+}
+
+// dropConn abruptly closes the current client connection,
+// simulating a transport failure.
+func (f *fakeMT5) dropConn() {
+	f.mu.Lock()
+	conn := f.curConn
+	f.mu.Unlock()
+	if conn != nil {
+		conn.Close()
+	}
+}
+
+func (f *fakeMT5) logins() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.loginCount
 }
 
 func (f *fakeMT5) respond(cmdID uint16, body []byte) []byte {
@@ -148,6 +170,7 @@ func (f *fakeMT5) dispatch(frame []byte) [][]byte {
 		f.mu.Lock()
 		f.gotLogin = binary.LittleEndian.Uint64(payload[736:744])
 		f.gotPassword = wire.DecodeUTF16LE(payload[4:476])
+		f.loginCount++
 		f.mu.Unlock()
 		return [][]byte{f.respond(cmd, make([]byte, 168))}
 	case wire.CmdAccount:
@@ -369,6 +392,9 @@ func startFakeMT5(t *testing.T) (*fakeMT5, string) {
 			return
 		}
 		defer conn.Close()
+		f.mu.Lock()
+		f.curConn = conn
+		f.mu.Unlock()
 		rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " +
 			base64.StdEncoding.EncodeToString(sum[:]) + "\r\n\r\n")
 		rw.Flush()

@@ -110,9 +110,11 @@ func inflate(data []byte) ([]byte, error) {
 func (c *Client) Subscribe(ctx context.Context, symbols ...string) error {
 	c.stateMu.RLock()
 	ids := make([]uint32, 0, len(symbols))
+	names := make([]string, 0, len(symbols))
 	for _, name := range symbols {
 		if s, ok := c.symbols[name]; ok {
 			ids = append(ids, uint32(s.ID))
+			names = append(names, name)
 		}
 	}
 	c.stateMu.RUnlock()
@@ -124,7 +126,17 @@ func (c *Client) Subscribe(ctx context.Context, symbols ...string) error {
 	for i, id := range ids {
 		binary.LittleEndian.PutUint32(payload[4+4*i:8+4*i], id)
 	}
-	return c.sendEncrypted(wire.CmdSubscribe, payload)
+	if err := c.sendEncrypted(ctx, wire.CmdSubscribe, payload); err != nil {
+		return err
+	}
+	// Remember the names so a reconnect can restore the
+	// subscriptions on the new session (see restoreSession).
+	c.stateMu.Lock()
+	for _, name := range names {
+		c.subscribed[name] = true
+	}
+	c.stateMu.Unlock()
+	return nil
 }
 
 // SubscribeQuote subscribes to a symbol and waits for its first
