@@ -76,6 +76,13 @@ statistics and account monitoring — see
 - **Subscribe before trading.** Market orders are priced from the
   live quote, so a symbol must be subscribed (and its first quote
   received) first — `SubscribeQuote` does both.
+- **Execution mode is handled for you.** Symbols execute in market
+  or instant mode and the protocol wants a different trade action
+  for each; the wrong one is rejected (retcode 10013). With the
+  default `Execution: ExecutionAuto` the client learns each
+  symbol's mode from the server and remembers it for the session,
+  and requotes (10004) are retried with a fresh quote. Set
+  `ExecutionMarket` / `ExecutionInstant` to pin the behavior.
 - **The position list can lag right after a trade.** `ClosePosition`
   and friends accept an optional `*PositionRef` / `*OrderRef` that
   supplies the position's fields directly and skips the list lookup,
@@ -96,6 +103,7 @@ statistics and account monitoring — see
 | `Host`       | optional access point `ip:port`; skips resolution when set              |
 | `Build`      | terminal protocol build, default 5830                                   |
 | `Timeout`    | per-request timeout, default 10s                                        |
+| `Execution`  | market-order execution mode: `ExecutionAuto` (default), `ExecutionMarket`, `ExecutionInstant` |
 | `TLSConfig`  | TLS override (default does not verify access-server certificates — they are reached by IP and present non-matching certs, as the reference client handles them) |
 | `HTTPClient` | HTTP client for server resolution                                       |
 

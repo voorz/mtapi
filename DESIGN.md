@@ -99,6 +99,38 @@ and `search.mtapi.io` fallbacks, `Config.Host` direct override, and a
 `servers.dat` parser (the reference ships one as a standalone script)
 for offline resolution.
 
+## 3.5 Live verification notes (Stage 1, 2026-10-27)
+
+Verified end to end against a live Exness demo account
+(Exness-MT5Trial5, Pro group) from a test host — the read path
+(account, symbols, quotes, candles, positions, orders, deals) and a
+full trade round trip (buy → modify SL/TP → partial close → close).
+Findings that changed the code, all invisible from the reference
+alone:
+
+- **The account record does not carry the login number** (it appears
+  nowhere in the login or account responses; the record's first
+  field is an internal id — the reference surfaces it as the login).
+  `Account.Login` reports the authenticated login instead. On this
+  server the record's equity/margin fields are also zero; the
+  balance is exact. Callers needing equity can compute
+  balance + Σ(position profit + swap) from the position list.
+- **Market orders are execution-mode sensitive.** The reference
+  hardcodes trade action MARKET, which instant-execution symbols
+  reject with retcode 10013 (nothing executes; the command-12 body
+  is 0 and the rejection arrives in the trade event). INSTANT is
+  required instead — for closes as well as opens. Implemented as
+  `Config.Execution` (Auto learns per symbol) — see trade.go.
+- **Instant closes requote.** With a zero price deviation a close
+  is answered 10004 as soon as the price ticks; closes therefore
+  accept a deviation like opens do, and market operations retry
+  requotes with a fresh quote (bounded).
+- **The position list lags partial closes.** Right after a partial
+  close the list still reports the pre-trade volume, and a full
+  close resolved from it is rejected 10014 (invalid volume). The
+  trade-fed cache is therefore updated from every trade result and
+  takes precedence over the list when resolving a ticket.
+
 ## 4. Stage 2 backlog — what the reference does not have
 
 Deliberately out of Stage 1; each item gets verified against the
