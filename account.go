@@ -15,6 +15,11 @@ func (c *Client) Account(ctx context.Context) (Account, error) {
 		return Account{}, err
 	}
 	acct := parseAccount(resp.Body)
+	// The account record does not carry the login number (verified
+	// against a live server: the number appears nowhere in the login or
+	// account responses; the record's first field is an internal id).
+	// Report the login this client authenticated with.
+	acct.Login = int64(c.cfg.Login)
 	c.stateMu.Lock()
 	c.account = acct
 	c.hasAccount = true
