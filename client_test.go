@@ -31,6 +31,8 @@ type fakeMT5 struct {
 	gotLogin    uint64
 	gotPassword string
 	subscribed  []uint32
+	posOpen     bool
+	pendOrder   bool
 }
 
 func (f *fakeMT5) respond(cmdID uint16, body []byte) []byte {
@@ -148,8 +150,10 @@ func (f *fakeMT5) dispatch(frame []byte) [][]byte {
 		}
 		f.mu.Unlock()
 		return [][]byte{f.respond(wire.CmdQuotes, f.quoteBody())}
+	case wire.CmdTrade:
+		return f.handleTrade(plain[4:])
 	case wire.CmdPositions:
-		return [][]byte{f.respond(cmd, make([]byte, 8))}
+		return [][]byte{f.respond(cmd, f.positionsBody())}
 	case wire.CmdDeals:
 		return [][]byte{f.respond(cmd, make([]byte, 4))}
 	case wire.CmdRates:
@@ -161,6 +165,92 @@ func (f *fakeMT5) dispatch(frame []byte) [][]byte {
 		return nil
 	}
 	return nil
+}
+
+// handleTrade answers a command-12 request. Most actions get both a
+// bare command-12 response and a detailed command-19 event; modify
+// actions get only the command-12 response, exercising the client's
+// fallback path.
+func (f *fakeMT5) handleTrade(op []byte) [][]byte {
+	action := binary.LittleEndian.Uint32(op[4:8])
+	tradePos := int64(binary.LittleEndian.Uint64(op[228:236]))
+	tradeOrder := int64(binary.LittleEndian.Uint64(op[84:92]))
+	volume := binary.LittleEndian.Uint64(op[72:80])
+
+	respBody := make([]byte, 4)
+	binary.LittleEndian.PutUint32(respBody, 10009)
+	cmd12 := f.respond(wire.CmdTrade, respBody)
+
+	event := func(order, deal int64) []byte {
+		body := make([]byte, 380)
+		copy(body[4:252], op)
+		ap := 252
+		binary.LittleEndian.PutUint32(body[ap:ap+4], 10009)
+		binary.LittleEndian.PutUint64(body[ap+4:ap+12], uint64(deal))
+		binary.LittleEndian.PutUint64(body[ap+12:ap+20], uint64(order))
+		binary.LittleEndian.PutUint64(body[ap+20:ap+28], volume)
+		binary.LittleEndian.PutUint64(body[ap+28:ap+36], math.Float64bits(1.0853))
+		copy(body[ap+64:ap+128], wire.EncodeUTF16LE("ok"))
+		return f.respond(wire.CmdTradeEvent, body)
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch action {
+	case wire.TradeMarket:
+		if tradePos == 0 {
+			f.posOpen = true
+			return [][]byte{cmd12, event(900001, 800001)}
+		}
+		f.posOpen = false
+		return [][]byte{cmd12, event(900001, 800002)}
+	case wire.TradePending:
+		f.pendOrder = true
+		return [][]byte{cmd12, event(900002, 0)}
+	case wire.TradeCancel:
+		f.pendOrder = false
+		return [][]byte{cmd12, event(tradeOrder, 0)}
+	case wire.TradeModify, wire.TradeModifyOrder:
+		return [][]byte{cmd12}
+	}
+	return [][]byte{cmd12}
+}
+
+// positionsBody builds a command-4 body from the fake's trade state.
+func (f *fakeMT5) positionsBody() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var body bytes.Buffer
+	posCount := uint32(0)
+	if f.posOpen {
+		posCount = 1
+	}
+	binary.Write(&body, binary.LittleEndian, posCount)
+	if f.posOpen {
+		rec := make([]byte, 344)
+		binary.LittleEndian.PutUint64(rec[0:8], 900001)
+		binary.LittleEndian.PutUint32(rec[16:20], 1700000000)
+		copy(rec[24:88], wire.EncodeUTF16LE("EURUSD"))
+		binary.LittleEndian.PutUint32(rec[88:92], 0) // buy
+		binary.LittleEndian.PutUint64(rec[92:100], math.Float64bits(1.0853))
+		binary.LittleEndian.PutUint64(rec[124:132], 1000000) // 0.01 lots
+		body.Write(rec)
+	}
+	ordCount := uint32(0)
+	if f.pendOrder {
+		ordCount = 1
+	}
+	binary.Write(&body, binary.LittleEndian, ordCount)
+	if f.pendOrder {
+		rec := make([]byte, 356)
+		binary.LittleEndian.PutUint64(rec[0:8], 900002)
+		copy(rec[72:136], wire.EncodeUTF16LE("EURUSD"))
+		binary.LittleEndian.PutUint32(rec[148:152], 2) // buy limit
+		binary.LittleEndian.PutUint32(rec[204:208], 1000000)
+		binary.LittleEndian.PutUint64(rec[336:344], math.Float64bits(1.08))
+		body.Write(rec)
+	}
+	return body.Bytes()
 }
 
 func isPadding(err error) bool {
