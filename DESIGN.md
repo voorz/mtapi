@@ -203,6 +203,7 @@ github.com/voorz/mtapi
   internal/cryptox/  AES-256-CBC, XOR chain, key handling
   internal/searchmq/ SearchMQ protocol, fallback source, servers.dat
   internal/ws/       minimal WebSocket client (see §6)
+  workers/           live-session pool: one worker per account (see §9)
   examples/stats/    login → account/positions/deals → JSON snapshot
   examples/quote/    subscribe and print quotes
   docs/              protocol notes distilled from the reference docs
@@ -239,3 +240,23 @@ github.com/voorz/mtapi
 | M2 | Subscribe/quotes, Positions, Orders, Deals, Candles            | `examples/stats` emits a full JSON snapshot |
 | M3 | Trading: market, pending, close/partial, modify, cancel; trade events; position cache + bypass semantics | Demo round-trip: open → modify → partial close → close, events observed |
 | M4 | Heartbeat, servers.dat offline resolution, multi-account example, docs | Two demo accounts polled in parallel from one program |
+
+## 9. Workers — live-session pool (added 2026-11-09)
+
+`github.com/voorz/mtapi/workers` manages one live session per
+account. A `Worker` IS the account's session: it dials once with
+`AutoReconnect` forced on, and queries (`Account`, `Positions`,
+`Orders`, `Deals`) are served from that session — no query ever
+logs in again. If the session dies for good, the worker re-dials
+with a bounded backoff; if the server rejects the credentials, the
+worker parks in `auth_failed` instead of hammering the server.
+`Pool.GetOrStart` is idempotent per (login, server); `Status`
+exposes the state (`connecting` / `connected` / `reconnecting` /
+`auth_failed` / `closed`), the last error and the reconnect count.
+
+Mechanism only, by design: start/stop timing, polling cadence and
+all derived metrics are the consumer's policy. The `Deal` and
+`Position` origin marker (`Magic`: manual trading is always 0, EA
+orders carry their configured value) and the deal `Entry` /
+`Position` fields were verified on a live account the same day and
+are pinned by fixture tests.
