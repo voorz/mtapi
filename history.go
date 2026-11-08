@@ -60,6 +60,7 @@ func parsePositions(body []byte) []Position {
 			Commission: vals.Float(14),
 			Comment:    vals.Str(18),
 			Time:       timeFromUnix(vals.Int(2)),
+			Magic:      vals.Int(22),
 		})
 	}
 	return out
@@ -139,8 +140,10 @@ func parseDeals(body []byte) []Deal {
 		out = append(out, Deal{
 			Ticket:     vals.Int(0),
 			Order:      vals.Int(2),
+			Position:   vals.Int(19),
 			Symbol:     vals.Str(5),
 			Type:       int(vals.Int(7)),
+			Entry:      int(vals.Int(6)),
 			Volume:     wire.VolumeToLots(vals.Uint(12)),
 			Price:      vals.Float(8),
 			Profit:     vals.Float(13),
@@ -148,6 +151,7 @@ func parseDeals(body []byte) []Deal {
 			Swap:       vals.Float(17),
 			Comment:    vals.Str(20),
 			Time:       timeFromUnix(vals.Int(3)),
+			Magic:      vals.Int(24),
 		})
 	}
 	return out

@@ -107,6 +107,11 @@ type Position struct {
 	Commission float64
 	Comment    string
 	Time       time.Time
+	// Magic is the origin marker of the order that opened the
+	// position (the MT5 magic number). Manual trading always carries
+	// 0; an EA carries its configured magic, which is non-zero in
+	// practice. Verified on a live account, 2026-11-09.
+	Magic int64
 }
 
 // Order is one pending order. The protocol's order record fills only
@@ -125,15 +130,21 @@ type Order struct {
 	Time    time.Time
 }
 
-// Deal is one executed deal from the account history. Position is part
-// of the data model but is not filled by the reference parser and
-// stays zero.
+// Deal entry values (Deal.Entry): whether the deal opened or closed
+// a position. Verified on a live account, 2026-11-09.
+const (
+	DealEntryIn  = 0 // the deal opens (or adds to) a position
+	DealEntryOut = 1 // the deal closes (or reduces) a position
+)
+
+// Deal is one executed deal from the account history.
 type Deal struct {
 	Ticket     int64
 	Order      int64 // order ticket that produced the deal
-	Position   int64
+	Position   int64 // position the deal belongs to
 	Symbol     string
 	Type       int
+	Entry      int     // DealEntryIn or DealEntryOut
 	Volume     float64 // lots
 	Price      float64
 	Profit     float64
@@ -141,6 +152,11 @@ type Deal struct {
 	Swap       float64
 	Comment    string
 	Time       time.Time
+	// Magic is the origin marker of the order that produced the deal
+	// (the MT5 magic number). Manual trading always carries 0; an EA
+	// carries its configured magic, which is non-zero in practice.
+	// Verified on a live account, 2026-11-09.
+	Magic int64
 }
 
 // Candle is one OHLC bar.
