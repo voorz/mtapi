@@ -94,7 +94,8 @@ func (f *fakeMT5) accountBody() []byte {
 	binary.LittleEndian.PutUint64(body[9:17], math.Float64bits(1000.5))
 	binary.LittleEndian.PutUint64(body[17:25], math.Float64bits(1001.5))
 	copy(body[25:89], wire.EncodeUTF16LE("USD"))
-	binary.LittleEndian.PutUint16(body[353:355], 500) // leverage
+	binary.LittleEndian.PutUint32(body[93:97], 500)   // leverage (field 7)
+	binary.LittleEndian.PutUint16(body[353:355], 6230) // server build (field 9)
 	return body
 }
 

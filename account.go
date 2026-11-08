@@ -36,8 +36,12 @@ func (c *Client) CachedAccount() (Account, bool) {
 	return c.account, c.hasAccount
 }
 
-// parseAccount parses the "fl" account record. Field indexes follow
-// the reference parser exactly; free_margin is not in the record.
+// parseAccount parses the "fl" account record; free_margin is not in
+// the record. Leverage is field 7, proven by a differential test on a
+// live account (2026-11-09): changing the account leverage 500 -> 200
+// moved field 7 with it while every other field stood still. Field 9,
+// which the reference parser reads, is the server build number (6230)
+// and never changes.
 func parseAccount(body []byte) Account {
 	vals, _ := wire.ParseSeries(body, wire.AccountSchema, 0)
 	return Account{
@@ -46,7 +50,7 @@ func parseAccount(body []byte) Account {
 		Equity:   vals.Float(4),
 		Currency: vals.Str(5),
 		Group:    vals.Str(8),
-		Leverage: int(vals.Int(9)),
+		Leverage: int(vals.Int(7)),
 		Server:   vals.Str(10),
 		Profit:   vals.Float(16),
 		Margin:   vals.Float(17),
