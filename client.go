@@ -210,23 +210,38 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 // once — broker IP rotations heal at the next dial.
 func (c *Client) establish(ctx context.Context) (*session, error) {
 	var conn *ws.Conn
-	for attempt := 0; ; attempt++ {
-		addr, cacheManaged, err := c.cfg.resolveAddr(ctx)
+	for pass := 0; ; pass++ {
+		addrs, cacheManaged, err := c.cfg.resolveAddrs(ctx)
 		if err != nil {
 			return nil, err
 		}
-		conn, err = ws.Dial(ctx, addr, "/terminal", ws.Options{
-			TLSConfig: c.cfg.TLSConfig,
-			Origin:    "https://" + addr,
-		})
-		if err == nil {
+		// Try every access point in directory order until one
+		// accepts the connection: a server's first listed point is
+		// not necessarily reachable (brokers publish points that
+		// are dead, or even private addresses leaked from their
+		// internal network), and the reference terminal fails over
+		// in exactly this way. Failover covers the transport dial
+		// only - once a point is connected, an auth or login
+		// failure is final, so credential errors are never retried
+		// against other points.
+		var dialErr error
+		for _, addr := range addrs {
+			conn, dialErr = ws.Dial(ctx, addr, "/terminal", ws.Options{
+				TLSConfig: c.cfg.TLSConfig,
+				Origin:    "https://" + addr,
+			})
+			if dialErr == nil {
+				break
+			}
+		}
+		if conn != nil {
 			break
 		}
-		if cacheManaged && attempt == 0 && c.cfg.Directory != nil {
+		if cacheManaged && pass == 0 && c.cfg.Directory != nil {
 			c.cfg.Directory.invalidateServer(c.cfg.Server)
 			continue
 		}
-		return nil, connError(err)
+		return nil, connError(dialErr)
 	}
 	c.sessMu.Lock()
 	c.nextSessID++
@@ -298,15 +313,17 @@ func (c *Client) waitSession(ctx context.Context) (*session, error) {
 	}
 }
 
-// resolveAddr determines the "host:port" of the access point. It
-// also reports whether the answer came from the directory cache
-// (the dial path uses this for stale-entry eviction).
-func (cfg Config) resolveAddr(ctx context.Context) (addr string, cacheManaged bool, err error) {
+// resolveAddrs determines the "host:port" access points of the
+// configured server, in the directory's order. It also reports
+// whether the answer came from the directory cache (the dial path
+// uses this for stale-entry eviction).
+func (cfg Config) resolveAddrs(ctx context.Context) (addrs []string, cacheManaged bool, err error) {
 	if cfg.Host != "" {
-		if _, _, err := net.SplitHostPort(cfg.Host); err != nil {
-			return net.JoinHostPort(cfg.Host, "443"), false, nil
+		host := cfg.Host
+		if _, _, serr := net.SplitHostPort(host); serr != nil {
+			host = net.JoinHostPort(host, "443")
 		}
-		return cfg.Host, false, nil
+		return []string{host}, false, nil
 	}
 	var ips []string
 	if cfg.Directory != nil {
@@ -315,16 +332,19 @@ func (cfg Config) resolveAddr(ctx context.Context) (addr string, cacheManaged bo
 		ips, err = FindServerIPs(ctx, cfg.Server, cfg.HTTPClient)
 	}
 	if err != nil {
-		return "", false, err
+		return nil, false, err
 	}
 	if len(ips) == 0 {
-		return "", false, fmt.Errorf("%w: %q has no access points", ErrServerNotFound, cfg.Server)
+		return nil, false, fmt.Errorf("%w: %q has no access points", ErrServerNotFound, cfg.Server)
 	}
-	addr = ips[0]
-	if _, _, err := net.SplitHostPort(addr); err != nil {
-		addr = net.JoinHostPort(addr, "443")
+	addrs = make([]string, 0, len(ips))
+	for _, ip := range ips {
+		if _, _, serr := net.SplitHostPort(ip); serr != nil {
+			ip = net.JoinHostPort(ip, "443")
+		}
+		addrs = append(addrs, ip)
 	}
-	return addr, cacheManaged, nil
+	return addrs, cacheManaged, nil
 }
 
 // Login returns the account number this client is logged in as.

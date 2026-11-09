@@ -260,3 +260,15 @@ all derived metrics are the consumer's policy. The `Deal` and
 orders carry their configured value) and the deal `Entry` /
 `Position` fields were verified on a live account the same day and
 are pinned by fixture tests.
+
+Access-point failover (added 2026-11-09): Dial tries every resolved
+access point in directory order until one accepts the WebSocket
+connection, mirroring the reference terminal. A server's first
+listed point is not necessarily reachable - TradeMaxGlobal-Demo
+publishes a private 10.20.200.56 address first, ahead of seven
+public points, and dialling only the first made every verification
+of that server time out. Failover covers the transport dial only:
+once a point is connected, an auth or login failure is final and
+is never retried against the remaining points. When every point
+refuses and the list came from the directory cache, the entry is
+evicted and the whole list is retried once, as before.
