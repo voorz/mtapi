@@ -143,6 +143,37 @@ alone:
   trade-fed cache is therefore updated from every trade result and
   takes precedence over the list when resolving a ticket.
 
+## 3.6 Live verification notes (2026-11-10)
+
+A reference-implementation audit (byte-level protocol comparison
+plus side-by-side live runs of the reference client) confirmed the
+port is faithful; the one divergence is deliberate — the reference
+reads leverage from account-record field 9, which is the server
+build number (6230); field 7 is the leverage, proven by changing
+the demo account's leverage and diffing the record.
+
+- **Long sessions freeze on the Exness line.** Command 4 on an
+  established session returns the position records as of login,
+  forever; a 60-second frame census showed no position or account
+  pushes at all (heartbeats only). Fresh logins read live values.
+  The reference client freezes identically. The fix mirrors the
+  genuine terminal: `Positions` recomputes floating profit locally
+  from the streamed quotes (see positions_live.go). Contract size
+  comes from a command-18 request when the symbol spec is missing:
+  the response holds one 3068-byte record with Point at offset
+  1396 and ContractSize at 1456 (both float64). The pushed
+  command-17 spec layout recorded by the reference did not match
+  the wire and is not used for this.
+- **Equity derivation.** The Exness account record also leaves
+  equity at zero (the reference reads the same zero). `Account`
+  now derives equity as balance + credit + Σ floating when the
+  record's equity is zero; the credit itself is record field 14
+  (`Account.Credit`).
+- **Empty symbol directories.** RoboForex-ECN, TradeMaxGlobal-Demo
+  and XMGlobal-MT5 answer command 34 with an empty body (the
+  reference client crashes parsing it). `Symbols` treats an empty
+  body as an empty directory so the session stays usable.
+
 ## 4. Stage 2 backlog — what the reference does not have
 
 Deliberately out of Stage 1; each item gets verified against the
