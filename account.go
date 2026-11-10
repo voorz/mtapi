@@ -20,6 +20,20 @@ func (c *Client) Account(ctx context.Context) (Account, error) {
 	// account responses; the record's first field is an internal id).
 	// Report the login this client authenticated with.
 	acct.Login = int64(c.cfg.Login)
+	// Some broker clusters leave the record's equity slot at zero
+	// (observed on the Exness line, where the reference client reads
+	// the same zero). Derive the equity then, the way the terminal
+	// does: balance plus credit plus the floating result of the
+	// open positions.
+	if acct.Equity == 0 && acct.Balance != 0 {
+		if positions, err := c.Positions(ctx); err == nil {
+			floating := 0.0
+			for _, p := range positions {
+				floating += p.Profit + p.Swap + p.Commission
+			}
+			acct.Equity = acct.Balance + acct.Credit + floating
+		}
+	}
 	c.stateMu.Lock()
 	c.account = acct
 	c.hasAccount = true
@@ -47,6 +61,7 @@ func parseAccount(body []byte) Account {
 	return Account{
 		Login:    vals.Int(1),
 		Balance:  vals.Float(3),
+		Credit:   float64(vals.Uint(14)),
 		Equity:   vals.Float(4),
 		Currency: vals.Str(5),
 		Group:    vals.Str(8),

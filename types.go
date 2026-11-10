@@ -44,6 +44,7 @@ const RetcodeInvalid = 10013
 type Account struct {
 	Login      int64
 	Balance    float64
+	Credit     float64
 	Equity     float64
 	Margin     float64
 	FreeMargin float64
