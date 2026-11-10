@@ -22,6 +22,20 @@ func (c *Client) Symbols(ctx context.Context) (map[string]Symbol, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Some broker clusters answer command 34 with an empty body:
+	// their web-terminal line serves no symbol directory at all
+	// (observed on RoboForex-ECN, TradeMaxGlobal-Demo and
+	// XMGlobal-MT5 access servers, 2026-11). Treat that as an
+	// empty directory instead of failing the session: the account,
+	// positions and deals channels of such a session stay usable,
+	// and symbol-dependent features degrade to their fallbacks.
+	if len(resp.Body) == 0 {
+		c.stateMu.Lock()
+		c.symbols = make(map[string]*Symbol)
+		c.symbolByID = make(map[int64]string)
+		c.stateMu.Unlock()
+		return map[string]Symbol{}, nil
+	}
 	symbols, err := parseSymbols(resp.Body)
 	if err != nil {
 		return nil, err
