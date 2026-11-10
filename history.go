@@ -12,13 +12,15 @@ import (
 // inside the command-4 response.
 const orderRecordSize = 356
 
-// Positions fetches the open positions (command 4).
+// Positions fetches the open positions (command 4). The Profit
+// fields are refreshed from the streamed quotes where the server
+// only serves a login-time snapshot; see livePositions.
 func (c *Client) Positions(ctx context.Context) ([]Position, error) {
 	resp, err := c.sendAndWait(ctx, wire.CmdPositions, nil, wire.CmdPositions)
 	if err != nil {
 		return nil, err
 	}
-	return parsePositions(resp.Body), nil
+	return c.livePositions(ctx, parsePositions(resp.Body)), nil
 }
 
 // Orders fetches the pending orders (command 4, the section after the

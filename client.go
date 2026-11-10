@@ -125,6 +125,7 @@ type Client struct {
 	orderCache  map[int64]Order
 	execLearned map[string]uint32 // symbol -> learned market trade action
 	subscribed  map[string]bool   // symbol names with a live subscription
+	specTried   map[string]time.Time // last command-18 spec fetch attempt per symbol
 	specData    map[int64][]byte
 	onQuote     func(Quote)
 	onTrade     func(TradeEvent)
@@ -172,6 +173,7 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 		symbolByID:  make(map[int64]string),
 		quotes:      make(map[string]Quote),
 		posCache:    make(map[int64]Position),
+		specTried:   make(map[string]time.Time),
 		orderCache:  make(map[int64]Order),
 		execLearned: make(map[string]uint32),
 		subscribed:  make(map[string]bool),

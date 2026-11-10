@@ -33,6 +33,7 @@ const (
 	CmdAcctUpdate = 14
 	CmdSystem     = 15
 	CmdSymbolSpec = 17
+	CmdSpecInfo   = 18
 	CmdTradeEvent = 19
 	CmdPosUpdate  = 22
 	CmdLogin      = 28
