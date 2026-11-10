@@ -69,7 +69,12 @@ func parsePositions(body []byte) []Position {
 // parseOrders parses the order section of a command-4 body, located
 // after all position records and an order count. Order records have
 // their own fixed 356-byte layout (not a schema record); the field
-// offsets follow the reference parser.
+// offsets follow the reference parser, with one correction verified
+// live on 2026-11-10: the open price sits at offset 164, not 336.
+// Offset 336 duplicates the open price on some server builds
+// (Exness) but holds 1.0 on others (STARTRADER, Doo Technology),
+// which made the ownership check reject genuine 6000.00 orders on
+// those servers; offset 164 carried the true price on all three.
 func parseOrders(body []byte) []Order {
 	if len(body) < 4 {
 		return nil
@@ -92,7 +97,7 @@ func parseOrders(body []byte) []Order {
 			Symbol: wire.DecodeUTF16LE(rec[72:136]),
 			Type:   int(binary.LittleEndian.Uint32(rec[148:152])),
 			Volume: wire.VolumeToLots(uint64(binary.LittleEndian.Uint32(rec[204:208]))),
-			Price:  f64At(rec, 336),
+			Price:  f64At(rec, 164),
 		})
 		off += orderRecordSize
 	}

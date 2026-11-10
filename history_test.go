@@ -2,6 +2,7 @@ package mtapi
 
 import (
 	"encoding/binary"
+	"math"
 	"testing"
 
 	"github.com/voorz/mtapi/internal/wire"
@@ -108,5 +109,45 @@ func TestParsePositionsMagic(t *testing.T) {
 	}
 	if positions[1].Magic != 0 {
 		t.Errorf("position 1 magic = %d, want 0 (manual)", positions[1].Magic)
+	}
+}
+
+// TestParseOrdersPriceOffset pins the 2026-11-10 correction: the
+// order record's open price lives at offset 164. Offset 336 holds
+// 1.0 on some server builds (STARTRADER, Doo Technology) while
+// duplicating the price on others (Exness), so a record carrying
+// 6000 at 164 and junk at 336 must still parse as 6000.
+func TestParseOrdersPriceOffset(t *testing.T) {
+	rec := make([]byte, orderRecordSize)
+	binary.LittleEndian.PutUint64(rec[0:8], 42)
+	for i, r := range "XAUUSD" {
+		binary.LittleEndian.PutUint16(rec[72+i*2:74+i*2], uint16(r))
+	}
+	binary.LittleEndian.PutUint32(rec[148:152], uint32(TypeBuyStop))
+	binary.LittleEndian.PutUint32(rec[204:208], 59000000) // 0.59 lots
+	binary.LittleEndian.PutUint64(rec[164:172], math.Float64bits(6000.00))
+	binary.LittleEndian.PutUint64(rec[336:344], math.Float64bits(1.0))
+
+	body := make([]byte, 0, 8+orderRecordSize)
+	var cnt [4]byte
+	binary.LittleEndian.PutUint32(cnt[:], 0) // no positions
+	body = append(body, cnt[:]...)
+	binary.LittleEndian.PutUint32(cnt[:], 1) // one order
+	body = append(body, cnt[:]...)
+	body = append(body, rec...)
+
+	orders := parseOrders(body)
+	if len(orders) != 1 {
+		t.Fatalf("expected 1 order, got %d", len(orders))
+	}
+	o := orders[0]
+	if o.Ticket != 42 || o.Symbol != "XAUUSD" || o.Type != TypeBuyStop {
+		t.Fatalf("unexpected order identity: %+v", o)
+	}
+	if math.Abs(o.Volume-0.59) > 1e-9 {
+		t.Fatalf("volume = %v, want 0.59", o.Volume)
+	}
+	if o.Price != 6000.00 {
+		t.Fatalf("price = %v, want 6000 (offset 164, not 336)", o.Price)
 	}
 }

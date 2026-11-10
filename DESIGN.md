@@ -272,3 +272,12 @@ once a point is connected, an auth or login failure is final and
 is never retried against the remaining points. When every point
 refuses and the list came from the directory cache, the entry is
 evicted and the whole list is retried once, as before.
+
+Order price offset correction (2026-11-10): the pending-order
+record's open price is read at offset 164, not 336 as the
+reference parser had it. Differential live reads on three servers
+(accounts holding a known BUY_STOP 0.59 @ 6000.00) showed offset
+164 = 6000.00 on all three, while offset 336 = 6000.00 only on
+Exness and 1.0 on STARTRADER and Doo Technology - the reference
+offset made the contest ownership check reject genuine orders on
+those servers. Pinned by TestParseOrdersPriceOffset.

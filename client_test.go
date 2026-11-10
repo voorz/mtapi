@@ -315,6 +315,7 @@ func (f *fakeMT5) positionsBody() []byte {
 		copy(rec[72:136], wire.EncodeUTF16LE("EURUSD"))
 		binary.LittleEndian.PutUint32(rec[148:152], 2) // buy limit
 		binary.LittleEndian.PutUint32(rec[204:208], 1000000)
+		binary.LittleEndian.PutUint64(rec[164:172], math.Float64bits(1.08))
 		binary.LittleEndian.PutUint64(rec[336:344], math.Float64bits(1.08))
 		body.Write(rec)
 	}
